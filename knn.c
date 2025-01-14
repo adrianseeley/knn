@@ -1,19 +1,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
-char* strsep(char** stringp, const char* delim) {
-    if (*stringp == NULL) {
+typedef struct {
+    int index;
+    float distance;
+} IndexDistance;
+
+char* strsep(char** stringp, const char* delim) 
+{
+    if (*stringp == NULL)
+    {
         return NULL;
     }
 
     char* start = *stringp;
     char* end = strpbrk(start, delim);
 
-    if (end) {
+    if (end) 
+    {
         *end = '\0';
         *stringp = end + 1;
-    } else {
+    } 
+    else 
+    {
         *stringp = NULL;
     }
 
@@ -27,9 +38,10 @@ int loadMNIST(const char* filename, int count, int inputSize, int outputSize, fl
 
     // open the file
     FILE* file;
-    if (fopen_s(&file, filename, "r") != 0) {
+    if (fopen_s(&file, filename, "r") != 0) 
+    {
         printf("Could not open file %s\n", filename);
-        return 1;
+        exit(1);
     }
 
     // allocate memory for inputs
@@ -38,7 +50,7 @@ int loadMNIST(const char* filename, int count, int inputSize, int outputSize, fl
     {
         printf("Could not allocate memory for inputs\n");
         fclose(file);
-        return 1;
+        exit(1);
     }
 
     // allocate memory for outputs
@@ -46,19 +58,16 @@ int loadMNIST(const char* filename, int count, int inputSize, int outputSize, fl
     if (*outputs == NULL)
     {
         printf("Could not allocate memory for outputs\n");
-        free(*inputs);
         fclose(file);
-        return 1;
+        exit(1);
     }
 
     // skip the header row
     if (fgets(line, sizeof(line), file) == NULL)
     {
         printf("File is empty or not formatted correctly\n");
-        free(*inputs);
-        free(*outputs);
         fclose(file);
-        return 1;
+        exit(1);
     }
 
     // read rows
@@ -77,10 +86,8 @@ int loadMNIST(const char* filename, int count, int inputSize, int outputSize, fl
                 if (label < 0 || label >= outputSize)
                 {
                     printf("Invalid label value: %d\n", label);
-                    free(*inputs);
-                    free(*outputs);
                     fclose(file);
-                    return 1;
+                    exit(1);
                 }
                 (*outputs)[row * outputSize + label] = 1.0f;
             }
@@ -98,10 +105,8 @@ int loadMNIST(const char* filename, int count, int inputSize, int outputSize, fl
         {
             printf("Invalid number of input columns at row %d\n", row + 1);
             printf("Expected: %d, Actual: %d\n", inputSize, col - 1);
-            free(*inputs);
-            free(*outputs);
             fclose(file);
-            return 1;
+            exit(1);
         }
 
         row++;
@@ -111,7 +116,104 @@ int loadMNIST(const char* filename, int count, int inputSize, int outputSize, fl
     return 0;
 }
 
-int main() {
+int argmax(int size, float* values)
+{
+    int maxIndex = 0;
+    float maxValue = values[0];
+    for (int i = 1; i < size; i++)
+    {
+        if (values[i] > maxValue)
+        {
+            maxIndex = i;
+            maxValue = values[i];
+        }
+    }
+    return maxIndex;
+}
+
+int compareIndexDistance(const void* a, const void* b)
+{
+    IndexDistance* id1 = (IndexDistance*)a;
+    IndexDistance* id2 = (IndexDistance*)b;
+    if (id1->distance < id2->distance) 
+    {
+        return -1;
+    }
+    if (id1->distance > id2->distance)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+int knn(int inputSize, int outputSize, int trainCount, float* trainInputs, float* trainOutputs, float* testInput, float* predictionOutput, IndexDistance* indexDistances, int k, float distanceThreshold, float distanceExponent)
+{
+    // calculate distances between test input and train inputs
+    for (int trainIndex = 0; trainIndex < trainCount; trainIndex++)
+    {
+        float distance = 0.0f;
+        for (int inputIndex = 0; inputIndex < inputSize; inputIndex++)
+        {
+            float difference = fabs(testInput[inputIndex] - trainInputs[trainIndex * inputSize + inputIndex]);
+            if (difference <= distanceThreshold)
+            {
+                continue;
+            }
+            distance += pow(difference, distanceExponent);
+        }
+        indexDistances[trainIndex].index = trainIndex;
+        indexDistances[trainIndex].distance = distance;
+    }
+
+    // sort low to high distance
+    qsort(indexDistances, trainCount, sizeof(IndexDistance), compareIndexDistance);
+
+    // zero prediction output
+    memset(predictionOutput, 0, outputSize * sizeof(float));
+
+    // accumulate
+    float weightSum = 0.0f;
+    for (int neighbourIndex = 0; neighbourIndex < k && neighbourIndex < trainCount; neighbourIndex++)
+    {
+        int trainIndex = indexDistances[neighbourIndex].index;
+        float distance = indexDistances[neighbourIndex].distance;
+        float weight = 1.0f / (distance + 0.0000001f);
+        weightSum += weight;
+        for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
+        {
+            float outputValue = trainOutputs[trainIndex * outputSize + outputIndex];
+            predictionOutput[outputIndex] += outputValue * weight;
+        }
+    }
+
+    // normalize
+    for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
+    {
+        predictionOutput[outputIndex] /= weightSum;
+    }
+
+    // done
+    return 0;
+}
+
+int knnTest(int inputSize, int outputSize, int trainCount, float* trainInputs, float* trainOutputs, int testCount, float* testInputs, int* testArgmax, float* predictionOutput, IndexDistance* indexDistances, int k, float distanceThreshold, float distanceExponent)
+{
+    int correctCount = 0;
+    for (int testIndex = 0; testIndex < testCount; testIndex++)
+    {
+        knn(inputSize, outputSize, trainCount, trainInputs, trainOutputs, &testInputs[testIndex * inputSize], predictionOutput, indexDistances, k, distanceThreshold, distanceExponent);
+        int predictionArgmax = argmax(outputSize, predictionOutput);
+        int testArgmaxValue = testArgmax[testIndex];
+        if (predictionArgmax == testArgmaxValue)
+        {
+            correctCount++;
+        }
+    }
+    return correctCount;
+}
+
+int main() 
+{
     int result = 0;
     int trainCount = 1000;
     int testCount = 1000;
@@ -120,52 +222,71 @@ int main() {
 
     float* trainInputs = NULL;
     float* trainOutputs = NULL;
+    int* trainArgmax = NULL;
     float* testInputs = NULL;
     float* testOutputs = NULL;
+    int* testArgmax = NULL;
+
+    IndexDistance* indexDistances = NULL;
+    float* predictionOutput = NULL;
 
     result = loadMNIST("d:/data/mnist_train.csv", trainCount, inputSize, outputSize, &trainInputs, &trainOutputs);
-    if (result != 0) {
+    if (result != 0) 
+    {
         printf("Failed to load training data.\n");
-        return result;
+        exit(1);
+    }
+
+    trainArgmax = (int*)calloc(trainCount, sizeof(int));
+    if (trainArgmax == NULL) 
+    {
+        printf("Failed to allocate memory for training argmax.\n");
+        exit(1);
+    }
+
+    for (int trainIndex = 0; trainIndex < trainCount; trainIndex++) 
+    {
+        trainArgmax[trainIndex] = argmax(outputSize, &trainOutputs[trainIndex * outputSize]);
     }
 
     result = loadMNIST("d:/data/mnist_test.csv", testCount, inputSize, outputSize, &testInputs, &testOutputs);
-    if (result != 0) {
+    if (result != 0) 
+    {
         printf("Failed to load test data.\n");
-        free(trainInputs);
-        free(trainOutputs);
-        return result;
+        exit(1);
     }
 
-    // show the first 10 training and test labels
-    for (int i = 0; i < 10; i++) {
-        printf("Train Label %d: ", i);
-        for (int j = 0; j < outputSize; j++) {
-            printf("%d", (int)trainOutputs[i * outputSize + j]);
-        }
-        printf("\n");
-
-        printf("Test Label %d: ", i);
-        for (int j = 0; j < outputSize; j++) {
-            printf("%d", (int)testOutputs[i * outputSize + j]);
-        }
-        printf("\n");
+    testArgmax = (int*)calloc(testCount, sizeof(int));
+    if (testArgmax == NULL) 
+    {
+        printf("Failed to allocate memory for test argmax.\n");
+        exit(1);
     }
 
-    // show the first 10 training and test inputs
-    for (int i = 0; i < 10; i++) {
-        printf("Train Input %d: ", i);
-        for (int j = 0; j < inputSize; j++) {
-            printf("%f ", trainInputs[i * inputSize + j]);
-        }
-        printf("\n");
-
-        printf("Test Input %d: ", i);
-        for (int j = 0; j < inputSize; j++) {
-            printf("%f ", testInputs[i * inputSize + j]);
-        }
-        printf("\n");
+    for (int testIndex = 0; testIndex < testCount; testIndex++) {
+        testArgmax[testIndex] = argmax(outputSize, &testOutputs[testIndex * outputSize]);
     }
 
-    return result;
+    indexDistances = (IndexDistance*)calloc(trainCount, sizeof(IndexDistance));
+    if (indexDistances == NULL) 
+    {
+        printf("Failed to allocate memory for index distances.\n");
+        exit(1);
+    }
+
+    predictionOutput = (float*)calloc(outputSize, sizeof(float));
+    if (predictionOutput == NULL) 
+    {
+        printf("Failed to allocate memory for prediction output.\n");
+        exit(1);
+    }
+
+    int k = 3;
+    float distanceThreshold = 0.1f;
+    float distanceExponent = 5.0f;
+
+    int correctCount = knnTest(inputSize, outputSize, trainCount, trainInputs, trainOutputs, testCount, testInputs, testArgmax, predictionOutput, indexDistances, k, distanceThreshold, distanceExponent);
+    printf("Correct count: %d of: %d\n", correctCount, testCount);
+
+    return 0;
 }

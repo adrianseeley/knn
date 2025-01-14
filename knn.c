@@ -2,11 +2,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <windows.h>
+#include <share.h>
+
+#define THREAD_COUNT 12
+#define EPSILON 0.0000001f
 
 typedef struct {
     int index;
     float distance;
 } IndexDistance;
+
+typedef struct {
+    int k;
+    float distanceThreshold;
+    float distanceExponent;
+} KnnParameters;
+
+typedef struct {
+    FILE* resultsFile;
+    KnnParameters* knnParameters;
+    int knnParametersIndex;
+    int knnParametersCount;
+    HANDLE parametersLock;
+    HANDLE resultsLock;
+    int trainCount;
+    int testCount;
+    int inputSize;
+    int outputSize;
+    float* trainInputs;
+    float* trainOutputs;
+    int* trainArgmax;
+    float* testInputs;
+    float* testOutputs;
+    int* testArgmax;
+} ThreadArgs;
 
 char* strsep(char** stringp, const char* delim) 
 {
@@ -177,7 +207,7 @@ int knn(int inputSize, int outputSize, int trainCount, float* trainInputs, float
     {
         int trainIndex = indexDistances[neighbourIndex].index;
         float distance = indexDistances[neighbourIndex].distance;
-        float weight = 1.0f / (distance + 0.0000001f);
+        float weight = 1.0f / (distance + EPSILON);
         weightSum += weight;
         for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
         {
@@ -212,6 +242,83 @@ int knnTest(int inputSize, int outputSize, int trainCount, float* trainInputs, f
     return correctCount;
 }
 
+FILE* createResultsFile(char* filename)
+{
+    FILE* file = _fsopen(filename, "w", _SH_DENYNO);
+    if (file == NULL)
+    {
+        printf("Could not create file %s\n", filename);
+        exit(1);
+    }
+    fprintf(file, "K,DistanceThreshold,DistanceExponent,CorrectCount\n");
+    return file;
+}
+
+DWORD WINAPI threadEntry(LPVOID arg) 
+{
+    ThreadArgs* threadArgs = (ThreadArgs*)arg;
+
+    IndexDistance* indexDistances = (IndexDistance*)calloc(threadArgs->trainCount, sizeof(IndexDistance));
+    if (indexDistances == NULL) 
+    {
+        printf("Failed to allocate memory for index distances.\n");
+        exit(1);
+    }
+
+    float* predictionOutput = (float*)calloc(threadArgs->outputSize, sizeof(float));
+    if (predictionOutput == NULL) 
+    {
+        printf("Failed to allocate memory for prediction output.\n");
+        exit(1);
+    }
+
+    // loop till complete
+    for (;;)
+    {
+        // lock parameters
+        WaitForSingleObject(threadArgs->parametersLock, INFINITE);
+
+        // get index
+        int knnParametersIndex = threadArgs->knnParametersIndex;
+
+        // if we are done break
+        if (knnParametersIndex >= threadArgs->knnParametersCount)
+        {
+            ReleaseMutex(threadArgs->parametersLock);
+            break;
+        }
+
+        // get parameters
+        KnnParameters knnParameters = threadArgs->knnParameters[knnParametersIndex];
+
+        // increment index
+        threadArgs->knnParametersIndex++;
+
+        // release parameters
+        ReleaseMutex(threadArgs->parametersLock);
+
+        // test knn
+        int correctCount = knnTest(threadArgs->inputSize, threadArgs->outputSize, threadArgs->trainCount, threadArgs->trainInputs, threadArgs->trainOutputs, threadArgs->testCount, threadArgs->testInputs, threadArgs->testArgmax, predictionOutput, indexDistances, knnParameters.k, knnParameters.distanceThreshold, knnParameters.distanceExponent);
+
+        // lock results
+        WaitForSingleObject(threadArgs->resultsLock, INFINITE);
+
+        // write results
+        fprintf(threadArgs->resultsFile, "%d,%f,%f,%d\n", knnParameters.k, knnParameters.distanceThreshold, knnParameters.distanceExponent, correctCount);
+
+        // flush
+        fflush(threadArgs->resultsFile);
+
+        // console log results
+        printf("K: %d, DistanceThreshold: %f, DistanceExponent: %f, CorrectCount: %d\n", knnParameters.k, knnParameters.distanceThreshold, knnParameters.distanceExponent, correctCount);
+
+        // release results
+        ReleaseMutex(threadArgs->resultsLock);
+    }
+
+    return 0;
+}
+
 int main() 
 {
     int result = 0;
@@ -226,9 +333,6 @@ int main()
     float* testInputs = NULL;
     float* testOutputs = NULL;
     int* testArgmax = NULL;
-
-    IndexDistance* indexDistances = NULL;
-    float* predictionOutput = NULL;
 
     result = loadMNIST("d:/data/mnist_train.csv", trainCount, inputSize, outputSize, &trainInputs, &trainOutputs);
     if (result != 0) 
@@ -267,26 +371,92 @@ int main()
         testArgmax[testIndex] = argmax(outputSize, &testOutputs[testIndex * outputSize]);
     }
 
-    indexDistances = (IndexDistance*)calloc(trainCount, sizeof(IndexDistance));
-    if (indexDistances == NULL) 
+    int kMin = 1;
+    int kMax = 20;
+    int kStep = 1;
+    float distanceThresholdMin = 0.000f;
+    float distanceThresholdMax = 1.000f;
+    float distanceThresholdStep = 0.005f;
+    float distanceExponentMin = 0.01f;
+    float distanceExponentMax = 20.0f;
+    float distanceExponentStep = 0.01f;
+    int knnParametersCount = 0;
+    for (int k = kMin; k <= kMax; k += kStep) 
     {
-        printf("Failed to allocate memory for index distances.\n");
+        for (float distanceThreshold = distanceThresholdMin; distanceThreshold <= distanceThresholdMax; distanceThreshold += distanceThresholdStep) 
+        {
+            for (float distanceExponent = distanceExponentMin; distanceExponent <= distanceExponentMax; distanceExponent += distanceExponentStep) 
+            {
+                knnParametersCount++;
+            }
+        }
+    }
+    printf("KNN Parameters Count: %d\n", knnParametersCount);
+
+    KnnParameters* knnParameters = (KnnParameters*)calloc(knnParametersCount, sizeof(KnnParameters));
+    if (knnParameters == NULL) 
+    {
+        printf("Failed to allocate memory for knn parameters.\n");
         exit(1);
     }
 
-    predictionOutput = (float*)calloc(outputSize, sizeof(float));
-    if (predictionOutput == NULL) 
+    int combinationIndex = 0;
+    for (int k = kMin; k <= kMax; k += kStep) 
     {
-        printf("Failed to allocate memory for prediction output.\n");
+        for (float distanceThreshold = distanceThresholdMin; distanceThreshold <= distanceThresholdMax; distanceThreshold += distanceThresholdStep) 
+        {
+            for (float distanceExponent = distanceExponentMin; distanceExponent <= distanceExponentMax; distanceExponent += distanceExponentStep) 
+            {
+                knnParameters[combinationIndex].k = k;
+                knnParameters[combinationIndex].distanceThreshold = distanceThreshold;
+                knnParameters[combinationIndex].distanceExponent = distanceExponent;
+                combinationIndex++;
+            }
+        }
+    }
+
+    FILE* resultsFile = createResultsFile("./results.csv");
+    
+    HANDLE parametersLock = CreateMutex(NULL, FALSE, NULL);
+    HANDLE resultsLock = CreateMutex(NULL, FALSE, NULL);
+    if (parametersLock == NULL || resultsLock == NULL) 
+    {
+        printf("Failed to create mutexes.\n");
         exit(1);
     }
 
-    int k = 3;
-    float distanceThreshold = 0.1f;
-    float distanceExponent = 5.0f;
+    ThreadArgs* threadArgs = (ThreadArgs*)calloc(1, sizeof(ThreadArgs));
+    if (threadArgs == NULL) 
+    {
+        printf("Failed to allocate memory for thread args.\n");
+        exit(1);
+    }
+    threadArgs->resultsFile = resultsFile;
+    threadArgs->knnParameters = knnParameters;
+    threadArgs->knnParametersIndex = 0;
+    threadArgs->knnParametersCount = knnParametersCount;
+    threadArgs->parametersLock = parametersLock;
+    threadArgs->resultsLock = resultsLock;
+    threadArgs->trainCount = trainCount;
+    threadArgs->testCount = testCount;
+    threadArgs->inputSize = inputSize;
+    threadArgs->outputSize = outputSize;
+    threadArgs->trainInputs = trainInputs;
+    threadArgs->trainOutputs = trainOutputs;
+    threadArgs->trainArgmax = trainArgmax;
+    threadArgs->testInputs = testInputs;
+    threadArgs->testOutputs = testOutputs;
+    threadArgs->testArgmax = testArgmax;
 
-    int correctCount = knnTest(inputSize, outputSize, trainCount, trainInputs, trainOutputs, testCount, testInputs, testArgmax, predictionOutput, indexDistances, k, distanceThreshold, distanceExponent);
-    printf("Correct count: %d of: %d\n", correctCount, testCount);
-
+    HANDLE threads[THREAD_COUNT];
+    for (int threadIndex = 0; threadIndex < THREAD_COUNT; threadIndex++) {
+        threads[threadIndex] = CreateThread(NULL, 0, threadEntry, threadArgs, 0, NULL);
+        if (threads[threadIndex] == NULL) {
+            perror("Failed to create thread");
+            exit(1);
+        }
+    }
+    WaitForMultipleObjects(THREAD_COUNT, threads, TRUE, INFINITE);
+    fclose(resultsFile);
     return 0;
 }

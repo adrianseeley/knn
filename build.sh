@@ -1,0 +1,1 @@
+clang knn.c -o knn.exe -O3 -march=native

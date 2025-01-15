@@ -1,2 +1,5 @@
-knn.exe
-results.csv
+knn_k_dt_de_reciprocal.exe
+knn_k_dt_de_reciprocal_rooted.exe
+knn_k_dt_de_average.exe
+knn_k_dt_de_linear.exe
+knn_k_dt_de_linear_rooted.exe

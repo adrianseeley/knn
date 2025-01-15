@@ -524,7 +524,7 @@ int main()
         }
     }
 
-    FILE* resultsFile = createResultsFile("./results.csv");
+    FILE* resultsFile = createResultsFile("./knn_k_dt_de_recip.csv");
     
     HANDLE parametersLock = CreateMutex(NULL, FALSE, NULL);
     HANDLE resultsLock = CreateMutex(NULL, FALSE, NULL);

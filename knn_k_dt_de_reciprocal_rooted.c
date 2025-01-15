@@ -209,6 +209,7 @@ int knn(
             }
             distance += pow(difference, distanceExponent);
         }
+        distance = pow(distance, 1.0f / distanceExponent);
         indexDistances[trainIndex].index = trainIndex;
         indexDistances[trainIndex].distance = distance;
     }
@@ -524,7 +525,7 @@ int main()
         }
     }
 
-    FILE* resultsFile = createResultsFile("./knn_k_dt_de_recip.csv");
+    FILE* resultsFile = createResultsFile("./knn_k_dt_de_reciprocal_rooted.csv");
     
     HANDLE parametersLock = CreateMutex(NULL, FALSE, NULL);
     HANDLE resultsLock = CreateMutex(NULL, FALSE, NULL);

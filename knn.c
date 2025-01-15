@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <share.h>
 
-#define THREAD_COUNT 12
+#define THREAD_COUNT 8
 #define EPSILON 0.0000001f
 
 typedef struct {
@@ -14,7 +14,9 @@ typedef struct {
 } IndexDistance;
 
 typedef struct {
-    int k;
+    int kCount;
+    int kMin;
+    int kMax;
     float distanceThreshold;
     float distanceExponent;
 } KnnParameters;
@@ -26,6 +28,7 @@ typedef struct {
     int knnParametersCount;
     HANDLE parametersLock;
     HANDLE resultsLock;
+    int kCount;
     int trainCount;
     int testCount;
     int inputSize;
@@ -176,7 +179,22 @@ int compareIndexDistance(const void* a, const void* b)
     return 0;
 }
 
-int knn(int inputSize, int outputSize, int trainCount, float* trainInputs, float* trainOutputs, float* testInput, float* predictionOutput, IndexDistance* indexDistances, int k, float distanceThreshold, float distanceExponent)
+int knn(
+    int inputSize, 
+    int outputSize, 
+    int trainCount, 
+    float* trainInputs, 
+    float* trainOutputs, 
+    float* testInput, 
+    float* weightSums, 
+    float* predictionOutputs, 
+    IndexDistance* indexDistances, 
+    int kCount, 
+    int kMin, 
+    int kMax, 
+    float distanceThreshold, 
+    float distanceExponent
+)
 {
     // calculate distances between test input and train inputs
     for (int trainIndex = 0; trainIndex < trainCount; trainIndex++)
@@ -198,48 +216,103 @@ int knn(int inputSize, int outputSize, int trainCount, float* trainInputs, float
     // sort low to high distance
     qsort(indexDistances, trainCount, sizeof(IndexDistance), compareIndexDistance);
 
-    // zero prediction output
-    memset(predictionOutput, 0, outputSize * sizeof(float));
+    // zero prediction outputs
+    memset(predictionOutputs, 0, kCount * outputSize * sizeof(float));
 
-    // accumulate
-    float weightSum = 0.0f;
-    for (int neighbourIndex = 0; neighbourIndex < k && neighbourIndex < trainCount; neighbourIndex++)
+    // zero weight sums
+    memset(weightSums, 0, kCount * sizeof(float));
+
+    // iterate neighbours up to kmax
+    for (int neighbourIndex = 0; neighbourIndex < kMax && neighbourIndex < trainCount; neighbourIndex++)
     {
         int trainIndex = indexDistances[neighbourIndex].index;
         float distance = indexDistances[neighbourIndex].distance;
         float weight = 1.0f / (distance + EPSILON);
-        weightSum += weight;
-        for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
+
+        for (int kIndex = 0; kIndex < kCount; kIndex++)
         {
-            float outputValue = trainOutputs[trainIndex * outputSize + outputIndex];
-            predictionOutput[outputIndex] += outputValue * weight;
+            int k = kMin + kIndex;
+            if (neighbourIndex < k)
+            {
+                weightSums[kIndex] += weight;
+                for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
+                {
+                    float outputValue = trainOutputs[trainIndex * outputSize + outputIndex];
+                    predictionOutputs[kIndex * outputSize + outputIndex] += outputValue * weight;
+                }
+            }
         }
     }
 
     // normalize
-    for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
+    for (int kIndex = 0; kIndex < kCount; kIndex++)
     {
-        predictionOutput[outputIndex] /= weightSum;
+        float weightSum = weightSums[kIndex];
+        for (int outputIndex = 0; outputIndex < outputSize; outputIndex++)
+        {
+            predictionOutputs[kIndex * outputSize + outputIndex] /= weightSum;
+        }
     }
 
     // done
     return 0;
 }
 
-int knnTest(int inputSize, int outputSize, int trainCount, float* trainInputs, float* trainOutputs, int testCount, float* testInputs, int* testArgmax, float* predictionOutput, IndexDistance* indexDistances, int k, float distanceThreshold, float distanceExponent)
+void knnTest(
+    int inputSize, 
+    int outputSize, 
+    int trainCount, 
+    float* trainInputs, 
+    float* trainOutputs, 
+    int testCount, 
+    float* testInputs, 
+    int* testArgmax, 
+    float* weightSums,
+    float* predictionOutputs,
+    IndexDistance* indexDistances, 
+    int kCount,
+    int kMin,
+    int kMax, 
+    float distanceThreshold, 
+    float distanceExponent,
+    int* correctCounts
+)
 {
-    int correctCount = 0;
+    // zero correct counts
+    memset(correctCounts, 0, kCount * sizeof(int));
+
+    // run through each test
     for (int testIndex = 0; testIndex < testCount; testIndex++)
     {
-        knn(inputSize, outputSize, trainCount, trainInputs, trainOutputs, &testInputs[testIndex * inputSize], predictionOutput, indexDistances, k, distanceThreshold, distanceExponent);
-        int predictionArgmax = argmax(outputSize, predictionOutput);
-        int testArgmaxValue = testArgmax[testIndex];
-        if (predictionArgmax == testArgmaxValue)
+        knn(
+            inputSize, 
+            outputSize, 
+            trainCount, 
+            trainInputs, 
+            trainOutputs, 
+            &testInputs[testIndex * inputSize], 
+            weightSums,
+            predictionOutputs, 
+            indexDistances,
+            kCount,
+            kMin,
+            kMax, 
+            distanceThreshold, 
+            distanceExponent
+        );
+
+        // iterate k to count corrects
+        for (int kIndex = 0; kIndex < kCount; kIndex++)
         {
-            correctCount++;
+            int k = kMin + kIndex;
+            int predictionArgmax = argmax(outputSize, &predictionOutputs[kIndex * outputSize]);
+            int testArgmaxValue = testArgmax[testIndex];
+            if (predictionArgmax == testArgmaxValue)
+            {
+                correctCounts[kIndex]++;
+            }
         }
     }
-    return correctCount;
 }
 
 FILE* createResultsFile(char* filename)
@@ -265,10 +338,24 @@ DWORD WINAPI threadEntry(LPVOID arg)
         exit(1);
     }
 
-    float* predictionOutput = (float*)calloc(threadArgs->outputSize, sizeof(float));
-    if (predictionOutput == NULL) 
+    float* weightSums = (float*)calloc(threadArgs->kCount, sizeof(float));
+    if (weightSums == NULL) 
     {
-        printf("Failed to allocate memory for prediction output.\n");
+        printf("Failed to allocate memory for weight sums.\n");
+        exit(1);
+    }
+
+    float* predictionOutputs = (float*)calloc(threadArgs->outputSize * threadArgs->kCount, sizeof(float));
+    if (predictionOutputs == NULL) 
+    {
+        printf("Failed to allocate memory for prediction outputs.\n");
+        exit(1);
+    }
+
+    int* correctCounts = (int*)calloc(threadArgs->kCount, sizeof(int));
+    if (correctCounts == NULL) 
+    {
+        printf("Failed to allocate memory for correct counts.\n");
         exit(1);
     }
 
@@ -298,19 +385,44 @@ DWORD WINAPI threadEntry(LPVOID arg)
         ReleaseMutex(threadArgs->parametersLock);
 
         // test knn
-        int correctCount = knnTest(threadArgs->inputSize, threadArgs->outputSize, threadArgs->trainCount, threadArgs->trainInputs, threadArgs->trainOutputs, threadArgs->testCount, threadArgs->testInputs, threadArgs->testArgmax, predictionOutput, indexDistances, knnParameters.k, knnParameters.distanceThreshold, knnParameters.distanceExponent);
+        knnTest(
+            threadArgs->inputSize, 
+            threadArgs->outputSize, 
+            threadArgs->trainCount, 
+            threadArgs->trainInputs, 
+            threadArgs->trainOutputs, 
+            threadArgs->testCount, 
+            threadArgs->testInputs, 
+            threadArgs->testArgmax,
+            weightSums, 
+            predictionOutputs,
+            indexDistances,
+            threadArgs->kCount,
+            knnParameters.kMin, 
+            knnParameters.kMax,
+            knnParameters.distanceThreshold, 
+            knnParameters.distanceExponent,
+            correctCounts
+        );
 
         // lock results
         WaitForSingleObject(threadArgs->resultsLock, INFINITE);
 
-        // write results
-        fprintf(threadArgs->resultsFile, "%d,%f,%f,%d\n", knnParameters.k, knnParameters.distanceThreshold, knnParameters.distanceExponent, correctCount);
+        // iterate k
+        for (int kIndex = 0; kIndex < threadArgs->kCount; kIndex++)
+        {
+            int k = knnParameters.kMin + kIndex;
+            int correctCount = correctCounts[kIndex];
+
+            // write results
+            fprintf(threadArgs->resultsFile, "%d,%f,%f,%d\n", k, knnParameters.distanceThreshold, knnParameters.distanceExponent, correctCount);
+
+            // console log results
+            printf("K: %d, DistanceThreshold: %f, DistanceExponent: %f, CorrectCount: %d\n", k, knnParameters.distanceThreshold, knnParameters.distanceExponent, correctCount);
+        }
 
         // flush
         fflush(threadArgs->resultsFile);
-
-        // console log results
-        printf("K: %d, DistanceThreshold: %f, DistanceExponent: %f, CorrectCount: %d\n", knnParameters.k, knnParameters.distanceThreshold, knnParameters.distanceExponent, correctCount);
 
         // release results
         ReleaseMutex(threadArgs->resultsLock);
@@ -373,22 +485,20 @@ int main()
 
     int kMin = 1;
     int kMax = 20;
+    int kCount = kMax - kMin + 1;
     int kStep = 1;
-    float distanceThresholdMin = 0.000f;
-    float distanceThresholdMax = 1.000f;
-    float distanceThresholdStep = 0.005f;
-    float distanceExponentMin = 0.01f;
+    float distanceThresholdMin = 0.00f;
+    float distanceThresholdMax = 1.00f;
+    float distanceThresholdStep = 0.01f;
+    float distanceExponentMin = 0.1f;
     float distanceExponentMax = 20.0f;
-    float distanceExponentStep = 0.01f;
+    float distanceExponentStep = 0.1f;
     int knnParametersCount = 0;
-    for (int k = kMin; k <= kMax; k += kStep) 
+    for (float distanceThreshold = distanceThresholdMin; distanceThreshold <= distanceThresholdMax; distanceThreshold += distanceThresholdStep) 
     {
-        for (float distanceThreshold = distanceThresholdMin; distanceThreshold <= distanceThresholdMax; distanceThreshold += distanceThresholdStep) 
+        for (float distanceExponent = distanceExponentMin; distanceExponent <= distanceExponentMax; distanceExponent += distanceExponentStep) 
         {
-            for (float distanceExponent = distanceExponentMin; distanceExponent <= distanceExponentMax; distanceExponent += distanceExponentStep) 
-            {
-                knnParametersCount++;
-            }
+            knnParametersCount++;
         }
     }
     printf("KNN Parameters Count: %d\n", knnParametersCount);
@@ -401,17 +511,16 @@ int main()
     }
 
     int combinationIndex = 0;
-    for (int k = kMin; k <= kMax; k += kStep) 
+    for (float distanceThreshold = distanceThresholdMin; distanceThreshold <= distanceThresholdMax; distanceThreshold += distanceThresholdStep) 
     {
-        for (float distanceThreshold = distanceThresholdMin; distanceThreshold <= distanceThresholdMax; distanceThreshold += distanceThresholdStep) 
+        for (float distanceExponent = distanceExponentMin; distanceExponent <= distanceExponentMax; distanceExponent += distanceExponentStep) 
         {
-            for (float distanceExponent = distanceExponentMin; distanceExponent <= distanceExponentMax; distanceExponent += distanceExponentStep) 
-            {
-                knnParameters[combinationIndex].k = k;
-                knnParameters[combinationIndex].distanceThreshold = distanceThreshold;
-                knnParameters[combinationIndex].distanceExponent = distanceExponent;
-                combinationIndex++;
-            }
+            knnParameters[combinationIndex].kCount = kCount;
+            knnParameters[combinationIndex].kMin = kMin;
+            knnParameters[combinationIndex].kMax = kMax;
+            knnParameters[combinationIndex].distanceThreshold = distanceThreshold;
+            knnParameters[combinationIndex].distanceExponent = distanceExponent;
+            combinationIndex++;
         }
     }
 
@@ -437,6 +546,7 @@ int main()
     threadArgs->knnParametersCount = knnParametersCount;
     threadArgs->parametersLock = parametersLock;
     threadArgs->resultsLock = resultsLock;
+    threadArgs->kCount = kCount;
     threadArgs->trainCount = trainCount;
     threadArgs->testCount = testCount;
     threadArgs->inputSize = inputSize;

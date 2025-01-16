@@ -1,5 +1,4 @@
-knn_k_dt_de_recip
-Measures the effects of k, distance threshold, and distance exponent, using reciprocal weighting of 1 / (distance + epsilon).
-
-knn_k_dt_de_average
-Measures the effects of k, distance threshold, and distance exponent, using flat average weighting, i.e., sum / k.
+What happens if you normalize a dataset so that the maximum distance between any two points in n dimensions in 1.
+Oh actually there is something even more interesting here, each dimension will have its own distribution, which may be normal or multimodal, or something else entirely.
+However, we get maximum use of KNN if we can distort or transform each dimension in such a way that we have an equal distance between each point that we have observed in that
+dimension. Keeping in line with the knn line of thinking, i.e., local to local interpolation a separate dimensional surface, we could simply order dimensional values, equally space them, and interpolate to determine the normalization value. We can further compound this by normalizing the entire system to a maximum distance of 1 to ensure the meaning of 0 and 1 is relevant and bounded in the BCS and WCS.
